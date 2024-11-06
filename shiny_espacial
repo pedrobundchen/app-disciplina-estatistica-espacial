@@ -1,0 +1,142 @@
+library(shiny)
+library(leaflet)
+library(dplyr)
+library(sf)
+library(readxl)
+library(classInt) 
+library(tidyr)
+
+
+sprs <- st_read("./dados/RS_Municipios_2022.shp", quiet = TRUE)
+sprs <- sprs %>%
+  slice(-1:-2)
+sprs <- st_transform(sprs, crs = 4326)
+sprs <- sprs %>%
+  mutate(NM_MUN = toupper(NM_MUN)) 
+
+df <- read_excel("./dados/Crimes_2023.xlsx") # Novo caminho
+df <- df %>%
+  slice(-1:-2)
+
+df2 <- read_excel("./dados/DADOSRS.xlsx") # Novo caminho
+df2 <- df2 %>%
+  mutate(Municipio = toupper(Municipio)) 
+colnames(df2) <- c("Municipio", "Mortalidade Infantil", "Matrículas - Ensino Fundamental", "PIB per Capta", "População", "Internação por Diarreia", "Salário Médio")
+
+df3 <- sprs %>%
+  left_join(df, by = c("NM_MUN" = "Municípios"))
+
+df4 <- df3 %>%
+  left_join(df2, by = c("NM_MUN" = "Municipio"))
+
+df4 <- df4 %>%
+  mutate(across(-CD_MUN, ~replace_na(., 0))) # Substitui NAs por 0
+
+df4 <- df4 %>%
+  mutate(across(where(~ !is.list(.)), ~ ifelse(. == "-", 0, .)))
+
+df4 <- df4 %>%
+  mutate(across(c(`Homicídio  Doloso`, `Total de vítimas de Homicidio Doloso`, `Latrocínio`, 
+                  `Furtos`, `Abigeato*`, `Furto de Veículo`, `Roubos`, `Roubo de Veículo`, 
+                  `Estelionato`, `Delitos Relacionados à Armas e Munições`, 
+                  `Entorpecentes - Posse`, `Entorpecentes - Tráfico`, `Vítimas de Latrocínio`, 
+                  `Vítimas de Lesão Corp. Seg. Morte`, `Total de Vítimas de CVLI*`,
+                  `Matrículas - Ensino Fundamental`), 
+                ~ round((. / População) * 1000, 6)))
+
+df4 <- df4 %>%
+  mutate(`Internação por Diarreia` = as.numeric(`Internação por Diarreia`) / 100)
+
+df4 <- df4 %>%
+  mutate(`Salário Médio` = as.numeric(`Salário Médio`) * 1212)
+
+df4$`Mortalidade Infantil` <- as.numeric(df4$`Mortalidade Infantil`)
+
+# Arredondar variáveis específicas em 4 casas decimais
+df4 <- df4 %>%
+  mutate(across(c(`Homicídio  Doloso`, `Total de vítimas de Homicidio Doloso`, `Latrocínio`, 
+                  `Furtos`, `Abigeato*`, `Furto de Veículo`, `Roubos`, `Roubo de Veículo`, 
+                  `Estelionato`, `Delitos Relacionados à Armas e Munições`, 
+                  `Entorpecentes - Posse`, `Entorpecentes - Tráfico`, `Vítimas de Latrocínio`, 
+                  `Vítimas de Lesão Corp. Seg. Morte`, `Total de Vítimas de CVLI*`, 
+                  `Mortalidade Infantil`, `Internação por Diarreia`), 
+                ~ round(., 4)))
+
+
+#df4 <- replace_na(df4, 0)
+
+
+# Definindo categorias
+categorias <- list(
+  "Crimes" = c("Homicídio  Doloso", "Total de vítimas de Homicidio Doloso", "Latrocínio", 
+               "Furtos", "Abigeato*", "Furto de Veículo", "Roubos", "Roubo de Veículo", 
+               "Estelionato", "Delitos Relacionados à Armas e Munições", "Entorpecentes - Posse", 
+               "Entorpecentes - Tráfico", "Vítimas de Latrocínio", "Vítimas de Lesão Corp. Seg. Morte", 
+               "Total de Vítimas de CVLI*"),
+  "Saúde" = c("Mortalidade Infantil", "Internação por Diarreia"),
+  "Economia" = "PIB per Capta",
+  "Educação" = "Matrículas - Ensino Fundamental",
+  "População" = "População"
+)
+
+# Interface do usuário
+ui <- fluidPage(
+  titlePanel(h2("Mapa Interativo do Rio Grande do Sul", align = "center")),
+  p("Nota: Todas as variáveis exibidas são medidas por 1000 habitantes, exceto PIB per Capta e População", 
+    style = "text-align: center; font-size: 16px;"),
+  selectInput("categoria", "Escolha uma categoria:",
+              choices = names(categorias)),
+  selectInput("variavel", "Escolha uma variável:", choices = NULL),
+  
+  # Ajuste de altura para tornar o mapa quadrado
+  leafletOutput("mapa", height = "680px")
+)
+
+# Servidor da aplicação
+server <- function(input, output, session) {
+  observeEvent(input$categoria, {
+    updateSelectInput(session, "variavel", 
+                      choices = categorias[[input$categoria]])
+  })
+  
+  output$mapa <- renderLeaflet({
+    req(input$variavel)
+    
+    # Calcula intervalos Jenks
+    jenks_breaks <- classIntervals(df4[[input$variavel]], n = 5, style = "jenks")
+    color_palette <- colorBin("YlOrRd", bins = jenks_breaks$brks, na.color = "transparent")
+    
+    leaflet(df4) %>%
+      addTiles() %>%
+      addPolygons(
+        fillColor = ~color_palette(df4[[input$variavel]]),
+        weight = 1,
+        opacity = 1,
+        color = "white",
+        dashArray = "3",
+        fillOpacity = 0.7,
+        highlightOptions = highlightOptions(
+          weight = 3,
+          color = "#666",
+          dashArray = "",
+          fillOpacity = 0.7,
+          bringToFront = TRUE
+        ),
+        label = ~paste(NM_MUN, ", ", input$variavel, ": ", round(df4[[input$variavel]], 6)),
+        labelOptions = labelOptions(
+          style = list("font-weight" = "normal", padding = "3px 8px"),
+          textsize = "15px",
+          direction = "auto"
+        )
+      ) %>%
+      setView(lng = -53.5, lat = -29.5, zoom = 7) %>%
+      addLegend("bottomright", 
+                pal = color_palette, 
+                values = df4[[input$variavel]], 
+                title = input$variavel, 
+                opacity = 1)
+  })
+}
+
+# Executa a aplicação
+shinyApp(ui, server)
